@@ -62,7 +62,8 @@ jobs:
             "https://github.com/microsoft/playwright-cli/archive/refs/tags/v${version}.tar.gz")"
           hash="$(jq -er '.hash' <<<"$prefetched")"
           source_path="$(jq -er '.storePath' <<<"$prefetched")"
-          npm_deps_hash="$(nix run nixpkgs#prefetch-npm-deps -- "$source_path/package-lock.json")"
+          npm_deps_hash="$(nix shell --inputs-from . nixpkgs#prefetch-npm-deps \
+            -c prefetch-npm-deps "$source_path/package-lock.json")"
           readonly sri_pattern='^sha256-[A-Za-z0-9+/]{43}=$'
           [[ "$hash" =~ $sri_pattern && "$npm_deps_hash" =~ $sri_pattern ]] || { echo 'Invalid resolved hash.' >&2; exit 1; }
 
@@ -77,12 +78,20 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   validate:
-    name: Validate release
+    name: Validate ${{ matrix.system }}
     needs: resolve
     if: needs.resolve.outputs.changed == 'true'
     permissions:
       contents: read
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            system: x86_64-linux
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - name: Check out resolved revision
@@ -102,6 +111,7 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
           SOURCE_HASH: ${{ needs.resolve.outputs.hash }}
           NPM_DEPS_HASH: ${{ needs.resolve.outputs.npm_deps_hash }}
+          SYSTEM: ${{ matrix.system }}
         shell: bash
         run: |
           set -euo pipefail
@@ -116,19 +126,7 @@ jobs:
             npmDepsHash = "$NPM_DEPS_HASH";
           }
           EOF
-          nix flake check --no-build
-          result_path="$(nix build --no-link --print-out-paths .#playwright-cli)"
-          [[ "$("$result_path/bin/playwright-cli" --version)" == "$VERSION" ]]
-
-          work_dir="$(mktemp -d "${RUNNER_TEMP:?}/playwright-cli-smoke.XXXXXX")"
-          cd "$work_dir"
-          session='update-smoke'
-          trap '"$result_path/bin/playwright-cli" -s="$session" close >/dev/null 2>&1 || true' EXIT
-          timeout 60 "$result_path/bin/playwright-cli" -s="$session" open --browser=chromium https://example.com
-          result="$(timeout 30 "$result_path/bin/playwright-cli" -s="$session" eval '() => document.title')"
-          [[ "$result" == *'Example Domain'* ]] || { echo 'Browser smoke test failed.' >&2; exit 1; }
-          "$result_path/bin/playwright-cli" -s="$session" close
-          trap - EXIT
+          ./scripts/smoke-test.sh "$SYSTEM" "$VERSION"
 
   commit:
     name: Commit validated release
@@ -157,6 +155,14 @@ jobs:
           readonly sri_pattern='^sha256-[A-Za-z0-9+/]{43}=$'
           [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$VERSION" =~ $version_pattern && "$SOURCE_HASH" =~ $sri_pattern && "$NPM_DEPS_HASH" =~ $sri_pattern ]] || { echo 'Invalid resolve output.' >&2; exit 1; }
 
+          work_dir="$(mktemp -d "${RUNNER_TEMP:?}/playwright-cli-commit.XXXXXX")"
+          git clone --no-checkout --filter=blob:none \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$work_dir"
+          [[ "$(git -C "$work_dir" rev-parse refs/remotes/origin/main)" == "$BASE_SHA" ]] || { echo 'main changed.' >&2; exit 1; }
+          git -C "$work_dir" checkout --detach "$BASE_SHA"
+          cd "$work_dir"
+          printf 'PLAYWRIGHT_CLI_COMMIT_WORKTREE=%s\n' "$work_dir" >> "$GITHUB_ENV"
+
           metadata="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
             --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 \
             'https://registry.npmjs.org/@playwright%2fcli/latest')"
@@ -165,15 +171,9 @@ jobs:
             "https://github.com/microsoft/playwright-cli/archive/refs/tags/v${VERSION}.tar.gz")"
           [[ "$(jq -er '.hash' <<<"$prefetched")" == "$SOURCE_HASH" ]] || { echo 'Source hash changed.' >&2; exit 1; }
           source_path="$(jq -er '.storePath' <<<"$prefetched")"
-          actual_npm_deps_hash="$(nix run nixpkgs#prefetch-npm-deps -- "$source_path/package-lock.json")"
+          actual_npm_deps_hash="$(nix shell --inputs-from . nixpkgs#prefetch-npm-deps \
+            -c prefetch-npm-deps "$source_path/package-lock.json")"
           [[ "$actual_npm_deps_hash" == "$NPM_DEPS_HASH" ]] || { echo 'npm dependency hash changed.' >&2; exit 1; }
-
-          work_dir="$(mktemp -d "${RUNNER_TEMP:?}/playwright-cli-commit.XXXXXX")"
-          git clone --no-checkout --filter=blob:none 'https://github.com/takeaship/playwright-cli-nix.git' "$work_dir"
-          [[ "$(git -C "$work_dir" rev-parse refs/remotes/origin/main)" == "$BASE_SHA" ]] || { echo 'main changed.' >&2; exit 1; }
-          git -C "$work_dir" checkout --detach "$BASE_SHA"
-          cd "$work_dir"
-          printf 'PLAYWRIGHT_CLI_COMMIT_WORKTREE=%s\n' "$work_dir" >> "$GITHUB_ENV"
 
           cat > version.nix <<EOF
           {

@@ -2,7 +2,6 @@
   lib,
   buildNpmPackage,
   fetchFromGitHub,
-  makeWrapper,
   chromium,
 }:
 let
@@ -22,14 +21,17 @@ buildNpmPackage {
   inherit (source) npmDepsHash;
   dontNpmBuild = true;
 
-  nativeBuildInputs = [ makeWrapper ];
-
-  postInstall = ''
-    wrapProgram "$out/bin/playwright-cli" \
-      --set-default NO_UPDATE_NOTIFIER true \
-      --set-default PLAYWRIGHT_MCP_BROWSER chromium \
-      --set-default PLAYWRIGHT_MCP_EXECUTABLE_PATH ${lib.getExe chromium}
-  '';
+  makeWrapperArgs = [
+    "--set-default"
+    "NO_UPDATE_NOTIFIER"
+    "true"
+    "--set-default"
+    "PLAYWRIGHT_MCP_BROWSER"
+    "chromium"
+    "--set-default"
+    "PLAYWRIGHT_MCP_EXECUTABLE_PATH"
+    (lib.getExe chromium)
+  ];
 
   meta = {
     description = "CLI for common Playwright browser automation actions";
