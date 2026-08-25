@@ -5,7 +5,7 @@ set -euo pipefail
 readonly system="${1:?usage: smoke-test.sh SYSTEM [VERSION]}"
 readonly expected_version="${2:-$(nix eval --raw --file version.nix version)}"
 
-nix flake check --all-systems --no-build
+nix flake check --no-build
 result_path="$(nix build --no-link --print-out-paths ".#packages.$system.playwright-cli")"
 actual_version="$("$result_path/bin/playwright-cli" --version)"
 [[ "$actual_version" == "$expected_version" ]] || {

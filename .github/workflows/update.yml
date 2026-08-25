@@ -157,7 +157,7 @@ jobs:
 
           work_dir="$(mktemp -d "${RUNNER_TEMP:?}/playwright-cli-commit.XXXXXX")"
           git clone --no-checkout --filter=blob:none \
-            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$work_dir"
+            'https://github.com/takeaship/playwright-cli-nix.git' "$work_dir"
           [[ "$(git -C "$work_dir" rev-parse refs/remotes/origin/main)" == "$BASE_SHA" ]] || { echo 'main changed.' >&2; exit 1; }
           git -C "$work_dir" checkout --detach "$BASE_SHA"
           cd "$work_dir"
