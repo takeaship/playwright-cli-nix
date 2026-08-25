@@ -38,11 +38,11 @@ nixpkgs does not provide the same Chromium package on macOS.
 npm dependency hash. The scheduled/manual workflow resolves the latest npm
 release, requires the matching GitHub tag, and rejects downgrades. A read-only
 job builds the candidate and launches Chromium against `https://example.com` on
-native x86_64 and ARM64 runners. The same checks run for every push and pull
-request. Only after validation succeeds does a separate write-enabled job
-re-resolve the same inputs, ensure `main` has not moved, and commit `version.nix`
-without executing the candidate CLI. Dependabot updates the locked nixpkgs input,
-including Chromium, weekly.
+native x86_64 and ARM64 runners. The same checks run for every pull request and
+can be started manually. Only after validation succeeds does a separate
+write-enabled job re-resolve the same inputs, ensure `main` has not moved, and
+commit `version.nix` without executing the candidate CLI. Dependabot updates the
+locked nixpkgs input, including Chromium, weekly.
 
 The source tag, npm metadata, and npm dependencies ultimately share upstream
 publisher trust. Their pinned hashes make an accepted release reproducible but
