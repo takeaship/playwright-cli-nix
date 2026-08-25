@@ -1,0 +1,197 @@
+name: Update Playwright CLI
+
+on:
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: playwright-cli-update
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve release metadata
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      base_sha: ${{ steps.resolve.outputs.base_sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      hash: ${{ steps.resolve.outputs.hash }}
+      npm_deps_hash: ${{ steps.resolve.outputs.npm_deps_hash }}
+      changed: ${{ steps.resolve.outputs.changed }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+        with:
+          github-token: ""
+          source-tag: v3.22.2
+      - name: Resolve official npm release and GitHub tag
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+          mapfile -t current_versions < <(sed -nE 's/^  version = "([0-9]+)\.([0-9]+)\.([0-9]+)";$/\1.\2.\3/p' version.nix)
+          [[ ${#current_versions[@]} -eq 1 ]] || { echo 'Invalid version.nix version.' >&2; exit 1; }
+          current_version="${current_versions[0]}"
+
+          metadata="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 \
+            'https://registry.npmjs.org/@playwright%2fcli/latest')"
+          version="$(jq -er '.version' <<<"$metadata")"
+          [[ "$version" =~ $version_pattern ]] || { echo 'Invalid npm version.' >&2; exit 1; }
+
+          if [[ "$(printf '%s\n%s\n' "$version" "$current_version" | sort -V | head -n1)" == "$version" && "$version" != "$current_version" ]]; then
+            echo "Refusing downgrade from $current_version to $version." >&2
+            exit 1
+          fi
+
+          prefetched="$(nix store prefetch-file --json --unpack \
+            "https://github.com/microsoft/playwright-cli/archive/refs/tags/v${version}.tar.gz")"
+          hash="$(jq -er '.hash' <<<"$prefetched")"
+          source_path="$(jq -er '.storePath' <<<"$prefetched")"
+          npm_deps_hash="$(nix run nixpkgs#prefetch-npm-deps -- "$source_path/package-lock.json")"
+          readonly sri_pattern='^sha256-[A-Za-z0-9+/]{43}=$'
+          [[ "$hash" =~ $sri_pattern && "$npm_deps_hash" =~ $sri_pattern ]] || { echo 'Invalid resolved hash.' >&2; exit 1; }
+
+          changed=false
+          [[ "$version" == "$current_version" ]] || changed=true
+          {
+            printf 'base_sha=%s\n' "$(git rev-parse HEAD)"
+            printf 'version=%s\n' "$version"
+            printf 'hash=%s\n' "$hash"
+            printf 'npm_deps_hash=%s\n' "$npm_deps_hash"
+            printf 'changed=%s\n' "$changed"
+          } >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Validate release
+    needs: resolve
+    if: needs.resolve.outputs.changed == 'true'
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out resolved revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.resolve.outputs.base_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+        with:
+          # This job executes the candidate CLI; keep GITHUB_TOKEN off the runner.
+          github-token: ""
+          source-tag: v3.22.2
+      - name: Build and execute candidate
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE_HASH: ${{ needs.resolve.outputs.hash }}
+          NPM_DEPS_HASH: ${{ needs.resolve.outputs.npm_deps_hash }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          readonly sri_pattern='^sha256-[A-Za-z0-9+/]{43}=$'
+          [[ "$VERSION" =~ $version_pattern && "$SOURCE_HASH" =~ $sri_pattern && "$NPM_DEPS_HASH" =~ $sri_pattern ]] || { echo 'Invalid resolve output.' >&2; exit 1; }
+
+          cat > version.nix <<EOF
+          {
+            version = "$VERSION";
+            hash = "$SOURCE_HASH";
+            npmDepsHash = "$NPM_DEPS_HASH";
+          }
+          EOF
+          nix flake check --no-build
+          result_path="$(nix build --no-link --print-out-paths .#playwright-cli)"
+          [[ "$("$result_path/bin/playwright-cli" --version)" == "$VERSION" ]]
+
+          work_dir="$(mktemp -d "${RUNNER_TEMP:?}/playwright-cli-smoke.XXXXXX")"
+          cd "$work_dir"
+          session='update-smoke'
+          trap '"$result_path/bin/playwright-cli" -s="$session" close >/dev/null 2>&1 || true' EXIT
+          timeout 60 "$result_path/bin/playwright-cli" -s="$session" open --browser=chromium https://example.com
+          result="$(timeout 30 "$result_path/bin/playwright-cli" -s="$session" eval '() => document.title')"
+          [[ "$result" == *'Example Domain'* ]] || { echo 'Browser smoke test failed.' >&2; exit 1; }
+          "$result_path/bin/playwright-cli" -s="$session" close
+          trap - EXIT
+
+  commit:
+    name: Commit validated release
+    needs: [resolve, validate]
+    if: needs.resolve.outputs.changed == 'true' && needs.validate.result == 'success'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+        with:
+          github-token: ""
+          source-tag: v3.22.2
+      - name: Re-resolve and prepare commit
+        env:
+          BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          SOURCE_HASH: ${{ needs.resolve.outputs.hash }}
+          NPM_DEPS_HASH: ${{ needs.resolve.outputs.npm_deps_hash }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly version_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          readonly sri_pattern='^sha256-[A-Za-z0-9+/]{43}=$'
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$VERSION" =~ $version_pattern && "$SOURCE_HASH" =~ $sri_pattern && "$NPM_DEPS_HASH" =~ $sri_pattern ]] || { echo 'Invalid resolve output.' >&2; exit 1; }
+
+          metadata="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --retry 3 --retry-all-errors --connect-timeout 15 --max-time 120 \
+            'https://registry.npmjs.org/@playwright%2fcli/latest')"
+          [[ "$(jq -er '.version' <<<"$metadata")" == "$VERSION" ]] || { echo 'Latest npm release changed.' >&2; exit 1; }
+          prefetched="$(nix store prefetch-file --json --unpack \
+            "https://github.com/microsoft/playwright-cli/archive/refs/tags/v${VERSION}.tar.gz")"
+          [[ "$(jq -er '.hash' <<<"$prefetched")" == "$SOURCE_HASH" ]] || { echo 'Source hash changed.' >&2; exit 1; }
+          source_path="$(jq -er '.storePath' <<<"$prefetched")"
+          actual_npm_deps_hash="$(nix run nixpkgs#prefetch-npm-deps -- "$source_path/package-lock.json")"
+          [[ "$actual_npm_deps_hash" == "$NPM_DEPS_HASH" ]] || { echo 'npm dependency hash changed.' >&2; exit 1; }
+
+          work_dir="$(mktemp -d "${RUNNER_TEMP:?}/playwright-cli-commit.XXXXXX")"
+          git clone --no-checkout --filter=blob:none 'https://github.com/takeaship/playwright-cli-nix.git' "$work_dir"
+          [[ "$(git -C "$work_dir" rev-parse refs/remotes/origin/main)" == "$BASE_SHA" ]] || { echo 'main changed.' >&2; exit 1; }
+          git -C "$work_dir" checkout --detach "$BASE_SHA"
+          cd "$work_dir"
+          printf 'PLAYWRIGHT_CLI_COMMIT_WORKTREE=%s\n' "$work_dir" >> "$GITHUB_ENV"
+
+          cat > version.nix <<EOF
+          {
+            version = "$VERSION";
+            hash = "$SOURCE_HASH";
+            npmDepsHash = "$NPM_DEPS_HASH";
+          }
+          EOF
+          git diff --check
+          git add version.nix
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "chore: update Playwright CLI to $VERSION"
+      - name: Push prepared commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PLAYWRIGHT_CLI_COMMIT_WORKTREE"
+          git -c "credential.helper=!f() { printf '%s\\n' 'username=x-access-token' \"password=\$GH_TOKEN\"; }; f" push origin HEAD:main
