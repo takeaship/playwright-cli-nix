@@ -32,7 +32,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
         with:
           github-token: ""
           source-tag: v3.22.2
@@ -101,7 +101,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
         with:
           # This job executes the candidate CLI; keep GITHUB_TOKEN off the runner.
           github-token: ""
@@ -138,7 +138,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
         with:
           github-token: ""
           source-tag: v3.22.2
